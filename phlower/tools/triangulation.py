@@ -3,10 +3,11 @@ import copy
 import random
 import networkx as nx
 from anndata import AnnData
-from scipy.sparse import linalg, csr_matrix
 from scipy.spatial import Delaunay,distance
+from scipy.sparse import linalg
 from ..util import tuple_increase, top_n_from, is_in_2sets, is_node_attr_existing
 from .graphconstr import adjedges
+from .incidence import create_node_edge_incidence_matrix
 from gudhi import SimplexTree
 import gudhi as gh
 
@@ -196,6 +197,10 @@ def construct_delaunay(adata:AnnData,
                        end_n = 5,
                        separate_ends_triangle = True,
                        random_seed = 2022,
+                       end_local_max_k: int = None,
+                       potential_projection: bool = False,
+                       potential_hop_m: int = 5,
+                       verbose: bool = False,
                        calc_layout:bool = False,
                        iscopy:bool=False,
                        ):
@@ -234,6 +239,10 @@ def construct_delaunay(adata:AnnData,
         whether to separate end points to different clusters
     random_seed: int
         random seed for selecting start and end points
+    potential_projection: bool
+        use potential projection instead of connecting ends to build circle graph
+    potential_hop_m: int
+        hop count for selecting neighborhood around each local maximum
     calc_layout: bool
         whether to calculate layout for the delaunay graph
     iscopy: bool
@@ -253,11 +262,15 @@ def construct_delaunay(adata:AnnData,
     if layout_name not in adata.obsm:
         raise ValueError(f"{layout_name} not in adata.obsm")
 
+    if verbose:
+        print("triangulation: constructing truncated Delaunay graph...")
     edges = truncated_delaunay(adata.uns[graph_name].nodes,
                                adata.obsm[layout_name],
                                trunc_quantile=trunc_quantile,
                                trunc_times=trunc_times)
     adata.uns[f'{graph_name}_triangulation'] = reset_edges(adata.uns[graph_name], edges, keep_old=False)
+    if verbose:
+        print(f"triangulation: kept {len(edges)} edges after truncation")
     construct_circle_delaunay(adata,
                               graph_name=f'{graph_name}_triangulation',
                               layout_name=layout_name,
@@ -268,6 +281,10 @@ def construct_delaunay(adata:AnnData,
                               end_n = end_n,
                               separate_ends_triangle = separate_ends_triangle,
                               random_seed = random_seed,
+                              end_local_max_k = end_local_max_k,
+                              potential_projection = potential_projection,
+                              potential_hop_m = potential_hop_m,
+                              verbose = verbose,
                               calc_layout = calc_layout,
                               iscopy=False)
     return adata if iscopy else None
@@ -322,6 +339,84 @@ def construct_trucated_delaunay(adata:AnnData,
     return adata if iscopy else None
 #end construct_trucated_delaunay
 
+
+def _select_pseudotime_roots_and_ends(g,
+                                      node_attr: str,
+                                      quant: float,
+                                      start_n: int,
+                                      end_n: int,
+                                      end_local_max_k: int = None,
+                                      verbose: bool = False):
+    values = np.fromiter(nx.get_node_attributes(g, node_attr).values(), dtype=np.float32)
+    if values.size == 0:
+        raise ValueError(f"node_attr {node_attr} not found on graph nodes")
+
+    n = len(g.nodes())
+    o = np.sort(values)
+    early = np.where(values <= o[round(n * quant)])[0]
+    if early.size == 0:
+        early = np.arange(n)
+
+    u = nx.get_node_attributes(g, node_attr)
+    root_nodes = top_n_from(early, u, min(start_n, len(early)), largest=False) if start_n > 0 else []
+
+    if end_local_max_k and end_local_max_k > 0:
+        local_max = []
+        for node in g.nodes():
+            val = u.get(node)
+            if val is None:
+                continue
+            neighs = [m for m, dist in nx.single_source_shortest_path_length(g, node, cutoff=end_local_max_k).items() if m != node]
+            if not neighs or all(val >= u.get(m, -np.inf) for m in neighs):
+                local_max.append(node)
+        end_nodes = np.array(local_max, dtype=int)
+        if end_nodes.size == 0:
+            end_nodes = np.where(values >= o[min(round(n * (1 - quant)), n - 1)])[0]
+    else:
+        end_nodes = np.where(values >= o[min(round(n * (1 - quant)), n - 1)])[0]
+
+    if not (end_local_max_k and end_local_max_k > 0) and end_n > 0 and len(end_nodes) > 0:
+        end_nodes = top_n_from(end_nodes, u, min(end_n, len(end_nodes)), largest=True)
+
+    if verbose:
+        print(f"triangulation: roots {len(root_nodes)}, max nodes {len(end_nodes)}")
+    return np.array(root_nodes, dtype=int), np.array(end_nodes, dtype=int)
+
+
+def _potential_projection_edge_vectors(g,
+                                       root_nodes: np.ndarray,
+                                       max_nodes: np.ndarray,
+                                       hop_m: int):
+    if hop_m <= 0:
+        raise ValueError("potential_hop_m must be > 0")
+    if len(root_nodes) == 0:
+        raise ValueError("root_nodes is empty, cannot build potential projection")
+
+    elist = np.array(list(g.edges()))
+    if elist.size == 0:
+        return np.empty((0, 0)), elist, []
+
+    B1 = create_node_edge_incidence_matrix(elist)
+    n_nodes = len(g.nodes())
+    root_potential = -1.0 / len(root_nodes)
+
+    edge_vectors = []
+    neighbor_nodes = []
+    for max_node in max_nodes:
+        neigh = list(nx.single_source_shortest_path_length(g, int(max_node), cutoff=hop_m).keys())
+        if not neigh:
+            continue
+        potential = np.zeros(n_nodes, dtype=float)
+        potential[neigh] = 1.0 / len(neigh)
+        potential[root_nodes] = root_potential
+        edge_vec = linalg.lsqr(B1, potential)[0]
+        edge_vectors.append(edge_vec)
+        neighbor_nodes.append(sorted(set(neigh)))
+
+    if not edge_vectors:
+        return np.empty((0, len(elist))), elist, neighbor_nodes
+    return np.array(edge_vectors), elist, neighbor_nodes
+
 def construct_circle_delaunay(adata:AnnData,
                               graph_name:str=None,
                               layout_name:str=None,
@@ -332,6 +427,10 @@ def construct_circle_delaunay(adata:AnnData,
                               end_n = 5,
                               separate_ends_triangle = True,
                               random_seed = 2022,
+                              end_local_max_k: int = None,
+                              potential_projection: bool = False,
+                              potential_hop_m: int = 5,
+                              verbose: bool = False,
                               calc_layout:bool = False,
                               iscopy:bool=False,
                               ):
@@ -363,6 +462,10 @@ def construct_circle_delaunay(adata:AnnData,
         whether to separate end points to different clusters
     random_seed: int
         random seed for selecting start and end points
+    potential_projection: bool
+        use potential projection instead of connecting ends to build circle graph
+    potential_hop_m: int
+        hop count for selecting neighborhood around each local maximum
     calc_layout: bool
         whether to calculate layout for the delaunay graph
     iscopy: bool
@@ -395,22 +498,66 @@ def construct_circle_delaunay(adata:AnnData,
     if end_n <1 or end_n >= len(adata.obs.index) :
         raise ValueError(f"end_n:{end_n} should between (1, {len(adata.obs.index)})")
 
+    circle_graph_name = f"{graph_name}_circle"
+    if potential_projection:
+        g = adata.uns[graph_name]
+        adata.uns[circle_graph_name] = copy.deepcopy(g)
+        root_nodes, max_nodes = _select_pseudotime_roots_and_ends(
+            g,
+            node_attr=node_attr,
+            quant=quant,
+            start_n=start_n,
+            end_n=end_n,
+            end_local_max_k=end_local_max_k,
+            verbose=verbose,
+        )
+        edge_vectors, elist, neighbor_nodes = _potential_projection_edge_vectors(
+            g,
+            root_nodes=root_nodes,
+            max_nodes=max_nodes,
+            hop_m=potential_hop_m,
+        )
+        adata.uns[f"{circle_graph_name}_L1Norm_decomp_vector"] = edge_vectors
+        adata.uns[f"{circle_graph_name}_L1Norm_decomp_value"] = np.zeros(edge_vectors.shape[0], dtype=float)
+        adata.uns[f"{circle_graph_name}_edge_list"] = elist
+        adata.uns[f"{circle_graph_name}_eigenvectors_method"] = "potential_projection"
+        if edge_vectors.shape[0] > 0:
+            adata.uns["eigen_value_knee"] = edge_vectors.shape[0]
+        adata.uns[f"{circle_graph_name}_potential_projection"] = {
+            "roots": root_nodes.tolist(),
+            "max_nodes": max_nodes.tolist(),
+            "neighbor_nodes": neighbor_nodes,
+            "hop_m": potential_hop_m,
+            "end_local_max_k": end_local_max_k,
+            "quant": quant,
+            "start_n": start_n,
+            "end_n": end_n,
+            "node_attr": node_attr,
+        }
+        if verbose:
+            print(f"triangulation: computed {edge_vectors.shape[0]} potential projection vectors")
+    else:
+        layouts = adata.obsm[layout_name]
+        group = adata.obs[cluster_name]
+        if verbose:
+            print("triangulation: connecting start/end nodes and building circle graph...")
+        adata.uns[circle_graph_name] = connect_starts_ends_with_Delaunay(adata.uns[graph_name],
+                                                                         layouts,
+                                                                         group,
+                                                                         quant=quant,
+                                                                         node_attr=node_attr,
+                                                                         start_n=start_n,
+                                                                         end_n=end_n,
+                                                                         separate_ends_triangle=separate_ends_triangle,
+                                                                         random_seed=random_seed,
+                                                                         end_local_max_k=end_local_max_k,
+                                                                         verbose=verbose)
 
-    layouts = adata.obsm[layout_name]
-    group = adata.obs[cluster_name]
-    adata.uns[f'{graph_name}_circle'] = connect_starts_ends_with_Delaunay(adata.uns[graph_name],
-                                                                          layouts,
-                                                                          group,
-                                                                          quant=quant,
-                                                                          node_attr=node_attr,
-                                                                          start_n=start_n,
-                                                                          end_n=end_n,
-                                                                          separate_ends_triangle=separate_ends_triangle,
-                                                                          random_seed=random_seed)
-
-    if calc_layout:
-        pydot_layouts = nx.nx_pydot.graphviz_layout(adata.uns[f"{graph_name}_circle"])
-        adata.obsm[f'{graph_name}_circle'] = np.array([pydot_layouts[i] for i in range(len(pydot_layouts))])
+        if calc_layout:
+            if verbose:
+                print("triangulation: calculating layout for circle graph...")
+            pydot_layouts = nx.nx_pydot.graphviz_layout(adata.uns[circle_graph_name])
+            adata.obsm[circle_graph_name] = np.array([pydot_layouts[i] for i in range(len(pydot_layouts))])
 
     return adata if iscopy else None
 #endf construct_circle_delaunay
@@ -576,7 +723,9 @@ def connect_starts_ends_with_Delaunay(g,
                                       start_n=5,
                                       end_n = 5,
                                       separate_ends_triangle = True,
-                                      random_seed = 2022
+                                      random_seed = 2022,
+                                      end_local_max_k: int = None,
+                                      verbose: bool = False
                                       ):
     """
     untangle the connections between starts and ends generated by delauney.
@@ -593,6 +742,9 @@ def connect_starts_ends_with_Delaunay(g,
     end_n:
     separate_ends_triangle:
     random_seed:
+    end_local_max_k:
+        if set, pick ends as local maxima of node_attr within k-hop neighborhood instead of top quantile
+    verbose: print progress if True
 
     Return
     -----
@@ -609,7 +761,23 @@ def connect_starts_ends_with_Delaunay(g,
     n=len(g.nodes())
     o=np.sort(values)
     early=np.where(values<=o[round(n*quant)])[0]
-    later=np.where(values>=o[min(round(n*(1-quant)), n-1)])[0]
+    if end_local_max_k and end_local_max_k > 0:
+        # nodes with attribute >= all nodes within k hops
+        u = nx.get_node_attributes(g, node_attr)
+        local_max = []
+        for node in g.nodes():
+            val = u[node]
+            neighs = [m for m, dist in nx.single_source_shortest_path_length(g, node, cutoff=end_local_max_k).items() if m != node]
+            if not neighs or all(val >= u[m] for m in neighs):
+                local_max.append(node)
+        later = np.array(local_max, dtype=int)
+        if len(later) == 0:
+            # fallback to quantile if no local maxima found
+            later=np.where(values>=o[min(round(n*(1-quant)), n-1)])[0]
+    else:
+        later=np.where(values>=o[min(round(n*(1-quant)), n-1)])[0]
+    if verbose:
+        print(f"triangulation: early nodes {len(early)}, end candidates {len(later)}")
 
     #node_attr='u'
     #start_n = 10
@@ -634,8 +802,9 @@ def connect_starts_ends_with_Delaunay(g,
 
     start_cts = list(set(group[starts]))
     end_cts = list(set(group[ends]))
-    print("start clusters ", start_cts)
-    print("end clusters ", end_cts)
+    if verbose:
+        print("triangulation: start clusters ", start_cts)
+        print("triangulation: end clusters ", end_cts)
     start_nodes = np.concatenate([np.where(np.array(group) == start_ct)[0] for start_ct in start_cts]).ravel()
     n_start_nodes = top_n_from(start_nodes, u, min(start_n, len(start_nodes)), largest=False)
 
@@ -674,6 +843,8 @@ def connect_starts_ends_with_Delaunay(g,
         ## filtering, ends should not be together.
         G_ae.add_edges_from(tri_edges)
 
+    if verbose:
+        print(f"triangulation: added {len(G_ae.edges())} edges in circle graph")
     return G_ae
 #endf connect_starts_ends_with_Delaunay
 
@@ -684,7 +855,8 @@ def connect_starts_ends_with_Delaunay_edges(g,
                                             node_attr='u',
                                             start_n=5,
                                             end_n = 5,
-                                            random_seed = 2022
+                                            random_seed = 2022,
+                                            end_local_max_k: int = None
                                             ):
     """
     untangle the connections between starts and ends generated by delauney.
@@ -700,6 +872,8 @@ def connect_starts_ends_with_Delaunay_edges(g,
     start_n:
     end_n:
     random_seed:
+    end_local_max_k:
+        if set, pick ends as local maxima of node_attr within k-hop neighborhood instead of top quantile
 
     Return
     -----
@@ -713,7 +887,19 @@ def connect_starts_ends_with_Delaunay_edges(g,
     n=len(g.nodes())
     o=np.sort(values)
     early=np.where(values<=o[round(n*quant)])[0]
-    later=np.where(values>=o[min(round(n*(1-quant)), n-1)])[0]
+    if end_local_max_k and end_local_max_k > 0:
+        u = nx.get_node_attributes(g, node_attr)
+        local_max = []
+        for node in g.nodes():
+            val = u[node]
+            neighs = [m for m, dist in nx.single_source_shortest_path_length(g, node, cutoff=end_local_max_k).items() if m != node]
+            if not neighs or all(val >= u[m] for m in neighs):
+                local_max.append(node)
+        later = np.array(local_max, dtype=int)
+        if len(later) == 0:
+            later=np.where(values>=o[min(round(n*(1-quant)), n-1)])[0]
+    else:
+        later=np.where(values>=o[min(round(n*(1-quant)), n-1)])[0]
 
     #node_attr='u'
     #start_n = 10

@@ -28,6 +28,8 @@ def edges_on_path(path: List[V]) -> Iterable[Tuple[V, V]]:
 
 
 def gscale(X:np.ndarray) -> np.ndarray:
+    # Ensure ndarray (not np.matrix) for compatibility with newer numpy
+    X = np.asarray(X)
     assert(X.all()>=0)
     div_ = np.divide(X.T, np.apply_along_axis(lambda x:np.exp(np.mean(np.log(x))), 1, X)).T
     scale_ = np.apply_along_axis(np.median,0, div_)
@@ -375,6 +377,5 @@ def diffusionGraph(X,roots,k=11,npc=None,ndc=40,s=1,j=7,lmda=1e-4,sigma=None, ve
   dic = diffusionGraphDM(pc, roots=roots,k=k,ndc=ndc,s=s,j=j,lmda=lmda,sigma=sigma, verbose=verbose, lstsq_method="lstsq")
   return dic
 #endf diffusionGraph
-
 
 

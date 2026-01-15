@@ -166,6 +166,7 @@ def L1Norm_decomp(adata: AnnData,
                   check_symmetric: bool = True,
                   isnorm = True,
                   iscopy: bool = False,
+                  overwrite_eigenvectors: bool = False,
         ):
 
     """
@@ -195,6 +196,8 @@ def L1Norm_decomp(adata: AnnData,
         normalize the graph hodge laplacian
     iscopy: bool
         copy the adata or not
+    overwrite_eigenvectors: bool
+        overwrite existing potential projection vectors if True
     """
     if iscopy:
         adata = adata.copy()
@@ -204,6 +207,10 @@ def L1Norm_decomp(adata: AnnData,
 
     if graph_name not in adata.uns.keys():
         raise Exception(f"graph {graph_name} not found in adata.uns")
+
+    method_key = f"{graph_name}_eigenvectors_method"
+    if not overwrite_eigenvectors and adata.uns.get(method_key) == "potential_projection":
+        return adata if iscopy else None
 
     elist = np.array(adata.uns[graph_name].edges())
     tlist = triangle_list(adata.uns[graph_name])
@@ -257,6 +264,8 @@ def L1Norm_decomp(adata: AnnData,
 
     adata.uns[f'{graph_name}_L1Norm_decomp_vector'] = d['v'] if L1_mode == "RW" else d['v'] @ np.sqrt(D2)
     adata.uns[f'{graph_name}_L1Norm_decomp_value'] = d['w'] if L1_mode == "RW" else d['w']
+    adata.uns[f'{graph_name}_edge_list'] = elist
+    adata.uns[method_key] = "l1norm_decomp"
 
     #adata.uns[f'{graph_name}_L1Norm_decomp_vector'] = d['v'] if L1_mode == "RW" else d['v']
     #adata.uns[f'{graph_name}_L1Norm_decomp_value'] = d['w'] if L1_mode == "RW" else d['w']
@@ -290,4 +299,3 @@ def knee_eigen(adata: AnnData,
     print("knee eigen value is ", idx)
 
     return adata if iscopy else None
-

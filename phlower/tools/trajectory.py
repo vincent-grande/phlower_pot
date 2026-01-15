@@ -72,9 +72,11 @@ def random_climb_knn(adata,
     adata = adata.copy() if iscopy else adata
 
     if "graph_basis" in adata.uns.keys() and not graph_name:
-        graph_name = adata.uns["graph_basis"] + "_triangulation"
-        A = re.sub("_g$", "_A", adata.uns["graph_basis"])
-        W = re.sub("_g$", "_W", adata.uns["graph_basis"])
+        graph_basis = adata.uns["graph_basis"]
+        graph_name_circle = graph_basis + "_triangulation_circle"
+        graph_name = graph_name_circle if graph_name_circle in adata.uns else graph_basis + "_triangulation"
+        A = re.sub("_g$", "_A", graph_basis)
+        W = re.sub("_g$", "_W", graph_basis)
 
     if graph_name not in adata.uns:
         raise ValueError(f"{graph_name} not in adata.uns")

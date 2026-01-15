@@ -399,8 +399,13 @@ def test_cholesky( A, beta=1e-6, verbose=False ):
     about half of these "zeros" may be negative -- tough on solvers.
     Also the condition number improves to ~ rho(A) / beta.
     """
-    #scikit-sparse
-    from sksparse.cholmod import cholesky, CholmodNotPositiveDefiniteError, CholmodTooLargeError
+    # Prefer scikit-sparse cholmod, but fall back cleanly if unavailable
+    try:
+        from sksparse.cholmod import cholesky, CholmodNotPositiveDefiniteError, CholmodTooLargeError
+    except ImportError:
+        if verbose:
+            print("cholmod not available; skipping cholesky and falling back to spsolve.")
+        return False
     if not scipy.sparse.isspmatrix_csc(A):
         A = scipy.sparse.csc_matrix(A)
     try:

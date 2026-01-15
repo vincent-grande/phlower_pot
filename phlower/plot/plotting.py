@@ -1000,8 +1000,16 @@ def plot_trajs_embedding(adata,
     if clusters not in adata.uns.keys():
         raise ValueError("clusters not in adata.uns.keys()")
 
+    emb = adata.uns[embedding]
+    if emb is not None:
+        emb = np.asarray(emb)
+        if emb.ndim == 1:
+            emb = emb.reshape(-1, 1)
+        if emb.shape[1] == 1:
+            emb = np.hstack([emb, np.zeros((emb.shape[0], 1))])
+
     plot_embedding(adata.uns[clusters],
-                   adata.uns[embedding],
+                   emb,
                    node_size=node_size,
                    label=label,
                    labelsize=labelsize,
@@ -1239,6 +1247,7 @@ def nxdraw_holes(adata: AnnData,
                  evector_name: str=None,
                  title: str= "",
                  edge_value: List[V] = [],
+                 edgelist=None,
                  vector_dim:int=0,
                  font_size:int=0,
                  node_size:float=1,
@@ -1270,6 +1279,8 @@ def nxdraw_holes(adata: AnnData,
         title of the plot
     edge_value: list
         the value of edges, if not None, use edge_value to plot the edge
+    edgelist: list
+        explicit edge ordering to align edge values with graph drawing
     vector_dim: int
         the dimension of the eigen vector to plot
     font_size: int
@@ -1320,7 +1331,17 @@ def nxdraw_holes(adata: AnnData,
     if len(edge_value)>0:
         H = np.abs(edge_value) if is_abs else edge_value
 
-    elist = adata.uns[graph_name].edges()
+    if edgelist is None:
+        edge_list_key = f"{graph_name}_edge_list"
+        if edge_list_key in adata.uns:
+            edgelist = adata.uns[edge_list_key]
+        else:
+            edgelist = list(adata.uns[graph_name].edges())
+    elist = [tuple(e) for e in edgelist]
+    if len(H) != len(elist):
+        raise ValueError(
+            f"Edge vector length {len(H)} does not match edgelist length {len(elist)}"
+        )
     #elist_set = set(list(elist))
     if with_potential is not None:
         u=nx.get_node_attributes(adata.uns[graph_name], with_potential)
@@ -1339,6 +1360,7 @@ def nxdraw_holes(adata: AnnData,
     width_range = [i*width for  i in (absH - min(absH))/(max(absH) - min(absH))]
     nx.draw_networkx(adata.uns[graph_name] if is_arrow else adata.uns[graph_name].to_undirected(),
                      adata.obsm[layout_name],
+                     edgelist=elist,
                      edge_color=list(H),
                      node_size=node_size,
                      width=width_range,
@@ -1947,6 +1969,8 @@ def plot_embedding(cluster_list = [],
     """
     if len(retain_clusters) == 0:
         retain_clusters = set(cluster_list)
+    if len(color_palette) < len(retain_clusters):
+        color_palette = sns.color_palette(cc.glasbey, n_colors=len(retain_clusters)).as_hex()
     if len(cluster_list)==0 or embedding is None:
         print("Error: cluster_list and embedding should be not None!")
         return
@@ -2546,4 +2570,3 @@ def L_plot_eigen_line(values, n_eig=10, step_size=1, show_legend=True, ax=None, 
     if show_legend:
         ax.legend()
 #endf plot_eigen_line
-

@@ -24,6 +24,7 @@ def ddhodge(
         lmda: float = 1e-4,
         sigma: float = None,
         layout: str = 'neato',
+        graph_tool: bool = False,
         iscopy: bool = False,
         verbose: bool = True,
         lstsq_method: str = 'lstsq',
@@ -52,6 +53,8 @@ def ddhodge(
         Regularization parameter for edge weights.
     layout
         Graphviz layout to use for visualization, can be one of 'dot', 'neato', 'fdp', 'sfdp', 'twopi', 'circo'.
+    graph_tool
+        If True, use graph-tool's sfdp_layout when layout is 'sfdp' (requires graph-tool).
 
     lstsq_method
         Diffusion psuedo time estimation method, can be one of 'lstsq', 'lsqr', 'lsmr', 'cholesky'.
@@ -102,7 +105,22 @@ def ddhodge(
     if layout:
         if verbose:
             print(datetime.now(), 'calculate layouts')
-        layouts = nx.nx_pydot.graphviz_layout(d['g'], prog=layout)
+        if graph_tool:
+            if layout != 'sfdp':
+                raise ValueError("graph_tool layout only supports 'sfdp'")
+            try:
+                import graph_tool as gt
+                import graph_tool.draw as gtd
+            except Exception as exc:
+                raise ImportError("graph_tool flag set but graph-tool is not available") from exc
+            g = d['g']
+            gt_g = gt.Graph(directed=g.is_directed())
+            gt_g.add_vertex(g.number_of_nodes())
+            gt_g.add_edge_list(g.edges())
+            pos = gtd.sfdp_layout(gt_g)
+            layouts = {int(v): (float(pos[v][0]), float(pos[v][1])) for v in gt_g.vertices()}
+        else:
+            layouts = nx.nx_pydot.graphviz_layout(d['g'], prog=layout)
         adata.obsm[f'{basis}_ddhodge_g'] = np.array([layouts[i] for i in range(len(layouts))])
     if verbose:
         print(datetime.now(), 'done')

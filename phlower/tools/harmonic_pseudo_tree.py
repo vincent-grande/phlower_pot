@@ -127,8 +127,7 @@ def harmonic_stream_tree(adata: AnnData,
     d =  harmonic_trajs_bins(adata = adata,
                              graph_name = graph_name,
                              evector_name = evector_name,
-                             #layout_name = adata.uns['graph_basis'], ## still use the default layout for visualization
-                             #layout_name = layout_name,
+                             layout_name = layout_name,
                              eigen_n = eigen_n,
                              full_traj_matrix = full_traj_matrix,
                              trajs_clusters = trajs_clusters,
@@ -171,10 +170,11 @@ def harmonic_stream_tree(adata: AnnData,
                          )
     if pca_name in adata.obsm:
         add_node_pca(adata, pca_name=pca_name)
-    if layout_name != adata.uns["graph_basis"]:
-        add_node_pca(adata, pca_name=adata.uns["graph_basis"]) ## layout name for late use
+    graph_basis = adata.uns.get("graph_basis")
+    if graph_basis and layout_name != graph_basis and graph_basis in adata.obsm:
+        add_node_pca(adata, pca_name=graph_basis) ## layout name for late use
     create_bstream_tree(adata, layout_name=layout_name, iscopy=False)
-    if layout_name != adata.uns["graph_basis"]:
+    if graph_basis and layout_name != graph_basis:
         #add_pca_to_stream(adata, attr=adata.uns["graph_basis"]) ## should be laytout, #TODO: check
         add_pca_to_stream(adata, attr=layout_name) ## should be laytout, #TODO: check
     if verbose:
@@ -694,11 +694,11 @@ def create_branching_tree(pairwise_bdict, keys=None):
     return htree, root
 
 def add_branching(tm, val, htree, htree_roots):
-    roots = np.array(htree_roots)
-    in_roots = np.where(np.array([True if len(set(r)&set(val))>0 else False for r in roots]))[0]
+    roots = list(htree_roots)
+    in_roots = [i for i, r in enumerate(roots) if len(set(r) & set(val)) > 0]
 
     if len(list(in_roots)) > 0: ## merge > 2 trees
-        up_leaves = {j for i in roots[in_roots] for j in i}
+        up_leaves = {j for i in in_roots for j in roots[i]}
         subleaves = set(val) - up_leaves
         all_leaves = tuple(up_leaves | subleaves)
         if(up_leaves == set(all_leaves)):
@@ -1149,5 +1149,3 @@ def _edge_mid_attribute(adata: AnnData,
     for i in range(elist.shape[0]):
         dic[i] = (u_score[elist[i][0]] + u_score[elist[i][1]])/2
     return dic
-
-

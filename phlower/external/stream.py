@@ -105,6 +105,34 @@ def assign_root(adata,
                 ):
     return adata.uns[tree].nodes[root]['label']
 
+def _auto_dist_scale(adata, root='root', dist_pctl=95, target_ratio=0.1):
+    if 'branch_dist' not in adata.obs:
+        return 1.0
+    try:
+        root_label = assign_root(adata, root=root)
+    except Exception:
+        root_label = None
+
+    pt_range = None
+    if root_label is not None:
+        pt_key = f"{root_label}_pseudotime"
+        if pt_key in adata.obs:
+            pt = np.asarray(adata.obs[pt_key])
+            pt_range = np.nanpercentile(pt, 99) - np.nanpercentile(pt, 1)
+    if pt_range is None and 'branch_lam' in adata.obs:
+        pt = np.asarray(adata.obs['branch_lam'])
+        pt_range = np.nanpercentile(pt, 99) - np.nanpercentile(pt, 1)
+    if pt_range is None or not np.isfinite(pt_range) or pt_range <= 0:
+        pt_range = 1.0
+
+    dist_vals = np.asarray(adata.obs['branch_dist'])
+    dist_p = np.nanpercentile(np.abs(dist_vals), dist_pctl)
+    if not np.isfinite(dist_p) or dist_p <= 0:
+        return 1.0
+
+    scale = (pt_range * target_ratio) / dist_p
+    return float(np.clip(scale, 1e-3, 1e3))
+
 
 def plot_stream_sc(adata,root='root',color=None,dist_scale=1,dist_pctl=95,preference=None,
                    fig_size=(7,4.5),fig_legend_ncol=1,fig_legend_order = None,
@@ -120,6 +148,8 @@ def plot_stream_sc(adata,root='root',color=None,dist_scale=1,dist_pctl=95,prefer
                    order = True,
                    plotly=False,
                    cmap_continous = 'viridis',
+                   hover_attr = None,
+                   dist_scale_ratio: float = 0.1,
                    ):
     """Generate stream plot at single cell level (aka, subway map plots)
 
@@ -131,9 +161,11 @@ def plot_stream_sc(adata,root='root',color=None,dist_scale=1,dist_pctl=95,prefer
         The starting node, temporialy abandoned cause it can be decided automatically.
     color: `list` optional (default: None)
         Column names of observations (adata.obs.columns) or variable names(adata.var_names). A list of names to be plotted.
-    dist_scale: `float`,optional (default: 1)
+    dist_scale: `float` or 'auto',optional (default: 1)
         Scaling factor to scale the distance from cells to tree branches
         (by default, it keeps the same distance as in original manifold)
+    dist_scale_ratio: `float`, optional (default: 0.1)
+        Target ratio of branch distance percentile to pseudotime range when dist_scale='auto'
     dist_pctl: `int`, optional (default: 95)
         Percentile of cells' distances from branches (between 0 and 100) used for calculating the distances between branches.
     preference: `list`, optional (default: None):
@@ -168,6 +200,8 @@ def plot_stream_sc(adata,root='root',color=None,dist_scale=1,dist_pctl=95,prefer
         if True, plotly will be used to make interactive plots
     cmap_continous: `str`, optional (default: 'viridis')
         continuous values cmap
+    hover_attr: `str` or `list`, optional (default: None)
+        Column names in adata.obs or adata.var_names to show on hover (plotly only)
     Returns
     -------
     updates `adata` with the following fields.
@@ -190,7 +224,15 @@ def plot_stream_sc(adata,root='root',color=None,dist_scale=1,dist_pctl=95,prefer
             preference = tree_label_convert(adata, "stream_tree", from_="label", to_='label', from_attr_list=preference["label"])
 
     #print(preference)
-    root = assign_root(adata, root=root)
+    root_label = assign_root(adata, root=root)
+    if dist_scale is None or dist_scale == "auto":
+        dist_scale = _auto_dist_scale(
+            adata,
+            root=root,
+            dist_pctl=dist_pctl,
+            target_ratio=dist_scale_ratio,
+        )
+    root = root_label
     figs = []
 
 
@@ -249,6 +291,20 @@ def plot_stream_sc(adata,root='root',color=None,dist_scale=1,dist_pctl=95,prefer
                            columns=['pseudotime','dist'])
     for ann in color:
         df_plot[ann] = dict_ann[ann]
+    if hover_attr is None:
+        hover_attr = []
+    elif isinstance(hover_attr, str):
+        hover_attr = [hover_attr]
+    if hover_attr:
+        for ann in hover_attr:
+            if ann in df_plot.columns:
+                continue
+            if ann in adata.obs.columns:
+                df_plot[ann] = adata.obs[ann]
+            elif ann in adata.var_names:
+                df_plot[ann] = adata.obs_vector(ann)
+            else:
+                raise ValueError("could not find '%s' in `adata.obs.columns` and `adata.var_names`"  % (ann))
     df_plot_shuf = df_plot.sample(frac=1,random_state=100)
 
     legend_order = {ann:np.unique(df_plot_shuf[ann]) for ann in color if is_string_dtype(df_plot_shuf[ann])}
@@ -262,11 +318,17 @@ def plot_stream_sc(adata,root='root',color=None,dist_scale=1,dist_pctl=95,prefer
                 print("'%s' is ignored for ordering legend labels due to incorrect name or data type" % ann)
 
     if(plotly):
+        try:
+            import plotly.express as px
+            import plotly.graph_objects as go
+        except ImportError as exc:
+            raise ImportError("plotly is required for plotly=True") from exc
         for ann in color:
             fig = px.scatter(df_plot_shuf, x='pseudotime', y='dist',color=ann,
                                  opacity=alpha,
                                  color_continuous_scale=px.colors.sequential.Viridis,
-                                 color_discrete_map=adata.uns[ann+'_color'] if ann+'_color' in adata.uns_keys() else {})
+                                 color_discrete_map=adata.uns[ann+'_color'] if ann+'_color' in adata.uns_keys() else {},
+                                 hover_data=hover_attr if hover_attr else None)
             if(show_graph):
                 for edge_i in stream_edges.keys():
                     branch_i_pos = stream_edges[edge_i]
@@ -462,6 +524,7 @@ def plot_stream(adata,root='root',color = None,preference=None,dist_scale=0.9,
                 fig_path=None,
                 fig_format='pdf',
                 cmap_continous = 'viridis',
+                dist_scale_ratio: float = 0.1,
                 ):
     """Generate stream plot at density level
 
@@ -476,8 +539,10 @@ def plot_stream(adata,root='root',color = None,preference=None,dist_scale=0.9,
     preference: `list`, optional (default: None):
         The preference of nodes. The branch with speficied nodes are preferred and put on the top part of stream plot.
         The higher ranks the node have, the closer to the top the branch with that node is.
-    dist_scale: `float`,optional (default: 0.9)
+    dist_scale: `float` or 'auto',optional (default: 0.9)
         Scaling factor. It controls the width of STREAM plot branches. The smaller, the thinner the branch will be.
+    dist_scale_ratio: `float`, optional (default: 0.1)
+        Target ratio of branch distance percentile to pseudotime range when dist_scale='auto'
     factor_num_win: `int`, optional (default: 10)
         Number of sliding windows used for making stream plot. It controls the smoothness of STREAM plot.
     factor_min_win: `float`, optional (default: 2.0)
@@ -518,7 +583,15 @@ def plot_stream(adata,root='root',color = None,preference=None,dist_scale=0.9,
     None
     """
     #print("Minor adjusted from https://github.com/pinellolab/STREAM  d20cc1faea58df10c53ee72447a9443f4b6c8e03")
-    root = assign_root(adata, root=root)
+    root_label = assign_root(adata, root=root)
+    if dist_scale is None or dist_scale == "auto":
+        dist_scale = _auto_dist_scale(
+            adata,
+            root=root,
+            dist_pctl=95,
+            target_ratio=dist_scale_ratio,
+        )
+    root = root_label
     figs = []
 
     ## if preference is a dict, convert to stream label to ordering
@@ -1080,4 +1153,3 @@ def detect_leaf_markers(adata,marker_list=None,cutoff_zscore=1.,cutoff_pvalue=1e
         dict_leaf_markers[x_alias].to_csv(os.path.join(file_path,'leaf_markers'+x_alias[0]+'_'+x_alias[1] + '.tsv'),sep = '\t',index = True)
     adata.uns['leaf_markers_all'] = df_leaf_markers
     adata.uns['leaf_markers'] = dict_leaf_markers
-
